@@ -1,0 +1,125 @@
+
+
+const SHEET_NAME = 'Attendance';
+const ADMIN_EMAIL = 'admin@gmail.com'; // <-- change if needed
+const THRESHOLD_PERCENT = 75;
+
+const COLS = {
+  ROLL_NO: 1,
+  NAME: 2,
+  EMAIL: 3,
+  TOTAL_CLASSES: 4,
+  ATTENDED: 5,
+  PERCENT: 6,
+  STATUS: 7
+};
+
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('Attendance Alerts')
+    .addItem('Check & Send Alerts Now', 'checkAttendance')
+    .addItem('Set Up Weekly Check Trigger', 'createWeeklyTrigger')
+    .addToUi();
+}
+
+/** Checks every student's attendance % and emails those below threshold */
+function checkAttendance() {
+  const sheet = getAttendanceSheet();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 2) return;
+
+  const data = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+
+  data.forEach((row, i) => {
+    const sheetRow = i + 2;
+    const name = row[COLS.NAME - 1];
+    const email = row[COLS.EMAIL - 1];
+    const totalClasses = Number(row[COLS.TOTAL_CLASSES - 1]);
+    const attended = Number(row[COLS.ATTENDED - 1]);
+
+    if (!name || !email || !totalClasses) {
+      sheet.getRange(sheetRow, COLS.STATUS).setValue('⚠️ Missing/invalid data');
+      return;
+    }
+
+    const percent = (attended / totalClasses) * 100;
+    sheet.getRange(sheetRow, COLS.PERCENT).setValue(percent.toFixed(1) + '%');
+
+    if (percent < THRESHOLD_PERCENT) {
+      const classesNeeded = calculateClassesNeeded(attended, totalClasses, THRESHOLD_PERCENT);
+      const body = buildAlertEmail(name, percent, attended, totalClasses, classesNeeded);
+      const result = sendEmailWithRetry(email, `Attendance Alert: You're below ${THRESHOLD_PERCENT}%`, body);
+
+      sheet.getRange(sheetRow, COLS.STATUS).setValue(result ? 'Alert Sent' : 'Failed');
+      if (!result) {
+        notifyAdmin(`Attendance alert email FAILED for ${name} (${email}), row ${sheetRow}.`);
+      }
+    } else {
+      sheet.getRange(sheetRow, COLS.STATUS).setValue('OK');
+    }
+  });
+}
+
+/** How many classes in a row the student needs to attend (assuming no more classes are missed) to reach the threshold */
+function calculateClassesNeeded(attended, totalClasses, thresholdPercent) {
+  // Solve for x: (attended + x) / (totalClasses + x) >= threshold/100
+  const threshold = thresholdPercent / 100;
+  let x = Math.ceil((threshold * totalClasses - attended) / (1 - threshold));
+  return Math.max(x, 0);
+}
+
+function buildAlertEmail(name, percent, attended, totalClasses, classesNeeded) {
+  return `Hello ${name},
+
+This is an automated attendance notice. Your current attendance stands at ${percent.toFixed(1)}%, which is below the required minimum of ${THRESHOLD_PERCENT}%.
+
+Classes Attended: ${attended} out of ${totalClasses}
+
+To bring your attendance back up to ${THRESHOLD_PERCENT}%, you would need to attend approximately ${classesNeeded} class(es) in a row without missing any further sessions (assuming no more classes are held in the meantime).
+
+Please make attending upcoming classes a priority. If you have any concerns or extenuating circumstances, reach out to the Academic Office as soon as possible.
+
+Regards,
+Academic Office`;
+}
+
+function sendEmailWithRetry(email, subjectLine, body) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      GmailApp.sendEmail(email, subjectLine, body);
+      return true;
+    } catch (err) {
+      console.warn(`Email attempt ${attempt} failed for ${email}: ${err.message}`);
+      if (attempt === 2) return false;
+      Utilities.sleep(2000);
+    }
+  }
+  return false;
+}
+
+function notifyAdmin(message) {
+  try {
+    GmailApp.sendEmail(ADMIN_EMAIL, 'Attendance Alert — Delivery Failure', message);
+  } catch (err) {
+    console.error('Failed to notify admin: ' + err.message);
+  }
+}
+
+function createWeeklyTrigger() {
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === 'checkAttendance') ScriptApp.deleteTrigger(t);
+  });
+  ScriptApp.newTrigger('checkAttendance')
+    .timeBased()
+    .onWeekDay(ScriptApp.WeekDay.MONDAY)
+    .atHour(8)
+    .create();
+  SpreadsheetApp.getUi().alert('Weekly trigger created — checkAttendance will run every Monday around 8 AM.');
+}
+
+function getAttendanceSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getSheetByName(SHEET_NAME);
+  if (!sheet) throw new Error(`Sheet "${SHEET_NAME}" not found.`);
+  return sheet;
+}
